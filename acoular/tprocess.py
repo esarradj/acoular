@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 #pylint: disable-msg=E0611, E1101, C0103, R0901, R0902, R0903, R0904, W0232
 #------------------------------------------------------------------------------
-# Copyright (c) 2007-2019, Acoular Development Team.
+# Copyright (c) 2007-2020, Acoular Development Team.
 #------------------------------------------------------------------------------
 """Implements processing in the time domain.
 
 .. autosummary::
     :toctree: generated/
 
+    SamplesGenerator
     TimeInOut
     MaskedTimeInOut
     Trigger
     AngleTracker
+    ChannelMixer
     SpatialInterpolator
     SpatialInterpolatorRotation
     SpatialInterpolatorConstantRotation
@@ -19,9 +21,15 @@
     TimePower
     TimeAverage
     TimeReverse
+    Filter
+    FilterBank
     FiltFiltOctave
     FiltOctave
+    TimeExpAverage
+    FiltFreqWeight
+    OctaveFilterBank
     TimeCache
+    TimeCumAverage
     WriteWAV
     WriteH5
     SampleSplitter
@@ -29,22 +37,23 @@
 
 # imports from other packages
 from numpy import array, empty, empty_like, pi, sin, sqrt, zeros, newaxis, unique, \
-int16, cross, isclose, zeros_like, dot, nan, concatenate, isnan, nansum, float64, \
-identity, argsort, interp, arange, append, linspace, flatnonzero, argmin, argmax, \
-delete, mean, inf, ceil, log2, logical_and, asarray, stack, sinc
+int16, nan, concatenate, sum, float64, identity, argsort, interp, arange, append, \
+linspace, flatnonzero, argmin, argmax, delete, mean, inf, asarray, stack, sinc, exp, \
+polymul, arange, cumsum
 
 from numpy.matlib import repmat
 
 from scipy.spatial import Delaunay
-from scipy.interpolate import LinearNDInterpolator,splrep, splev, CloughTocher2DInterpolator, CubicSpline, Rbf
-from traits.api import Float, Int, CLong, Bool, ListInt, \
-File, Property, Instance, Trait, Delegate, \
+from scipy.interpolate import LinearNDInterpolator,splrep, splev, \
+CloughTocher2DInterpolator, CubicSpline, Rbf
+from traits.api import HasPrivateTraits, Float, Int, CLong, Bool, ListInt, \
+Constant, File, Property, Instance, Trait, Delegate, \
 cached_property, on_trait_change, List, CArray, Dict
 
 from datetime import datetime
 from os import path
 import wave
-from scipy.signal import butter, lfilter, filtfilt
+from scipy.signal import butter, lfilter, filtfilt, bilinear
 from warnings import warn
 from collections import deque
 from inspect import currentframe
@@ -54,10 +63,53 @@ import threading
 from .internal import digest
 from .h5cache import H5cache, td_dir
 from .h5files import H5CacheFileBase, _get_h5file_class
-from .sources import SamplesGenerator
 from .environments import cartToCyl,cylToCart
 from .microphones import MicGeom
 from .configuration import config
+
+
+class SamplesGenerator( HasPrivateTraits ):
+    """
+    Base class for any generating signal processing block
+    
+    It provides a common interface for all SamplesGenerator classes, which
+    generate an output via the generator :meth:`result`.
+    This class has no real functionality on its own and should not be 
+    used directly.
+    """
+
+    #: Sampling frequency of the signal, defaults to 1.0
+    sample_freq = Float(1.0, 
+        desc="sampling frequency")
+    
+    #: Number of channels 
+    numchannels = CLong
+               
+    #: Number of samples 
+    numsamples = CLong
+    
+    # internal identifier
+    digest = Property
+    
+    def _get_digest( self ): 
+        return '' 
+               
+    def result(self, num):
+        """
+        Python generator that yields the output block-wise.
+                
+        Parameters
+        ----------
+        num : integer
+            This parameter defines the size of the blocks to be yielded
+            (i.e. the number of samples per block) 
+        
+        Returns
+        -------
+        No output since `SamplesGenerator` only represents a base class to derive
+        other classes from.
+        """
+        pass
 
 
 class TimeInOut( SamplesGenerator ):
@@ -217,8 +269,55 @@ class MaskedTimeInOut ( TimeInOut ):
         else: # if no start/stop given, don't do the resorting thing
             for block in self.source.result(num):
                 yield block[:, self.channels]
-                
 
+
+class ChannelMixer( TimeInOut ):
+    """
+    Class for directly mixing the channels of a multi-channel source. 
+    Outputs a single channel.
+    """
+    
+    #: Amplitude weight(s) for the channels as array. If not set, all channels are equally weighted.
+    weights = CArray(desc="channel weights")
+    
+    # Number of channels is always one here.
+    numchannels = Constant(1)
+    
+    # internal identifier
+    digest = Property( depends_on = ['source.digest', 'weights'])
+
+    @cached_property
+    def _get_digest( self ):
+        return digest(self)         
+
+    def result(self, num):
+        """ 
+        Python generator that yields the output block-wise.
+        
+        Parameters
+        ----------
+        num : integer
+            This parameter defines the size of the blocks to be yielded
+            (i.e. the number of samples per block).
+        
+        Returns
+        -------
+        Samples in blocks of shape (num, 1). 
+            The last block may be shorter than num.
+        """
+        if self.weights.size:
+            if self.weights.shape in {(self.source.numchannels,), (1,)}:
+                weights = self.weights
+            else:
+                raise ValueError("Weight factors can not be broadcasted: %s, %s" % \
+                                 (self.weights.shape, (self.source.numchannels,)))
+        else: 
+            weights = 1
+        
+        for block in self.source.result(num):
+            yield sum(weights*block, 1, keepdims=True)
+  
+    
 class Trigger(TimeInOut):
     """
     Class for identifying trigger signals.
@@ -233,7 +332,7 @@ class Trigger(TimeInOut):
     In the end, the algorithm checks if the found peak locations result in rpm that don't
     vary too much.
     """
-    #: Data source; :class:`~acoular.sources.SamplesGenerator` or derived object.
+    #: Data source; :class:`~acoular.tprocess.SamplesGenerator` or derived object.
     source = Instance(SamplesGenerator)
     
     #: Threshold of trigger. Has different meanings for different 
@@ -405,7 +504,7 @@ class AngleTracker(MaskedTimeInOut):
 
     '''
 
-    #: Data source; :class:`~acoular.SamplesGenerator` or derived object.
+    #: Data source; :class:`~acoular.tprocess.SamplesGenerator` or derived object.
     source = Instance(SamplesGenerator)    
     
     #: Trigger data from :class:`acoular.tprocess.Trigger`.
@@ -571,7 +670,7 @@ class SpatialInterpolator(TimeInOut):
         self._mics_virtual = mics_virtual
 
     
-    #: Data source; :class:`~acoular.sources.SamplesGenerator` or derived object.
+    #: Data source; :class:`~acoular.tprocess.SamplesGenerator` or derived object.
     source = Instance(SamplesGenerator)
     
     #: Interpolation method in spacial domain, defaults to
@@ -1077,10 +1176,10 @@ class Mixer( TimeInOut ):
     Mixes the signals from several sources.
     """
 
-    #: Data source; :class:`~acoular.sources.SamplesGenerator` object.
+    #: Data source; :class:`~acoular.tprocess.SamplesGenerator` object.
     source = Trait(SamplesGenerator)
 
-    #: List of additional :class:`~acoular.sources.SamplesGenerator` objects
+    #: List of additional :class:`~acoular.tprocess.SamplesGenerator` objects
     #: to be mixed.
     sources = List( Instance(SamplesGenerator, ()) ) 
 
@@ -1176,7 +1275,7 @@ class TimePower( TimeInOut ):
     
 class TimeAverage( TimeInOut ) :
     """
-    Calculates time-depended average of the signal
+    Calculates time-dependent average of the signal
     """
     #: Number of samples to average over, defaults to 64.
     naverage = Int(64, 
@@ -1228,7 +1327,38 @@ class TimeAverage( TimeInOut ) :
             nso = int(ns/nav)
             if nso > 0:
                 yield temp[:nso*nav].reshape((nso, -1, nc)).mean(axis=1)
-                
+
+class TimeCumAverage( TimeInOut):
+    """
+    Calculates cumulative average of the signal, useful for Leq
+    """
+    def result(self, num):
+        """
+        Python generator that yields the output block-wise.
+
+        
+        Parameters
+        ----------
+        num : integer
+            This parameter defines the size of the blocks to be yielded
+            (i.e. the number of samples per block).
+        
+        Returns
+        -------
+        Cumulative average of the output of source. 
+            Yields samples in blocks of shape (num, numchannels). 
+            The last block may be shorter than num.
+        """
+        count = (arange(num) + 1)[:,newaxis]
+        for i,temp in enumerate(self.source.result(num)):
+            ns, nc = temp.shape
+            if not i:
+                accu = zeros((1,nc))
+            temp = (accu*(count[0]-1) + cumsum(temp,axis=0))/count[:ns]
+            accu = temp[-1]
+            count += ns
+            yield temp
+        
 class TimeReverse( TimeInOut ):
     """
     Calculates the time-reversed signal of a source. 
@@ -1262,6 +1392,45 @@ class TimeReverse( TimeInOut ):
             temp[:nsh] = h[nsh-1::-1]
         yield temp[:nsh]
         
+class Filter(TimeInOut):
+    """
+    Abstract base class for IIR filters based on scipy lfilter
+    implements a filter with coefficients that may be changed
+    during processing
+    
+    Should not be instanciated by itself
+    """
+    #: Filter coefficients
+    ba = Property()
+
+    def _get_ba( self ):
+        return [1],[1]
+
+    def result(self, num):
+        """ 
+        Python generator that yields the output block-wise.
+
+        
+        Parameters
+        ----------
+        num : integer
+            This parameter defines the size of the blocks to be yielded
+            (i.e. the number of samples per block).
+        
+        Returns
+        -------
+        Samples in blocks of shape (num, numchannels). 
+            Delivers the bandpass filtered output of source.
+            The last block may be shorter than num.
+        """
+        b, a = self.ba
+        zi = zeros((max(len(a), len(b))-1, self.source.numchannels))
+        for block in self.source.result(num):
+            b, a = self.ba # this line is useful in case of changes 
+                            # to self.ba during generator lifetime
+            block, zi = lfilter(b, a, block, axis=0, zi=zi)
+            yield block
+
 class FiltFiltOctave( TimeInOut ):
     """
     Octave or third-octave filter with zero phase delay.
@@ -1346,15 +1515,151 @@ class FiltFiltOctave( TimeInOut ):
             yield data[j:j+num]
             j += num
 
-class FiltOctave( FiltFiltOctave ):
+
+class FiltOctave( Filter ):
     """
-    Octave or third-octave filter (not zero-phase).
+    Octave or third-octave filter (causal, non-zero phase delay).    
     """
+    #: Band center frequency; defaults to 1000.
+    band = Float(1000.0, 
+        desc = "band center frequency")
+        
+    #: Octave fraction: 'Octave' or 'Third octave'; defaults to 'Octave'.
+    fraction = Trait('Octave', {'Octave':1, 'Third octave':3}, 
+        desc = "fraction of octave")
+
+    #: Filter order
+    order = Int(3, desc = "IIR filter order")
+        
+    ba = Property( depends_on = ['band', 'fraction', 'source.digest', 'order'])
+
+    # internal identifier
+    digest = Property( depends_on = ['source.digest', '__class__', \
+        'band', 'fraction','order'])
+
+    @cached_property
+    def _get_digest( self ):
+        return digest(self)
+        
+    @cached_property
+    def _get_ba( self ):
+        # filter design
+        fs = self.sample_freq
+        # adjust filter edge frequencies
+        beta = pi/(4*self.order)
+        alpha = pow(2.0, 1.0/(2.0*self.fraction_))
+        beta = 2 * beta / sin(beta) / (alpha-1/alpha)
+        alpha = (1+sqrt(1+beta*beta))/beta
+        fr = 2*self.band/fs
+        if fr > 1/sqrt(2):
+            raise ValueError("band frequency too high:%f,%f" % (self.band, fs))
+        om1 = fr/alpha 
+        om2 = fr*alpha
+        return butter(self.order, [om1, om2], 'bandpass') 
+
+class TimeExpAverage(Filter):
+    """
+    Computes exponential averaging according to IEC 61672-1
+    time constant: F -> 125 ms, S -> 1 s
+    I (non-standard) -> 35 ms 
+    """
+
+    #: time weighting
+    weight = Trait('F', {'F':0.125, 'S':1.0, 'I':0.035}, 
+        desc = "time weighting")    
+
+    ba = Property( depends_on = ['weight', 'source.digest'])
+       
+    # internal identifier
+    digest = Property( depends_on = ['source.digest', '__class__', \
+        'weight'])
+
+    @cached_property
+    def _get_digest( self ):
+        return digest(self)
+        
+    @cached_property
+    def _get_ba( self ):
+        alpha = 1-exp(-1/self.weight_/self.sample_freq)
+        a = [1, alpha-1]
+        b = [alpha]
+        return b,a 
+
+class FiltFreqWeight( Filter ):
+    """
+    Frequency weighting filter accoring to IEC 61672
+    """
+    #: weighting characteristics
+    weight = Trait('A',('A','C','Z'), desc="frequency weighting")
+
+    ba = Property( depends_on = ['weight', 'source.digest'])
+
+    # internal identifier
+    digest = Property( depends_on = ['source.digest', '__class__'])
+
+    @cached_property
+    def _get_digest( self ):
+        return digest(self)
+
+    @cached_property
+    def _get_ba( self ):
+        # s domain coefficients
+        f1 = 20.598997
+        f2 = 107.65265
+        f3 = 737.86223
+        f4 = 12194.217
+        a = polymul([1, 4*pi * f4, (2*pi * f4)**2],
+                    [1, 4*pi * f1, (2*pi * f1)**2])
+        if self.weight == 'A':
+            a = polymul(polymul(a, [1, 2*pi * f3]), [1, 2*pi * f2])
+            b = [(2*pi * f4)**2 * 10**(1.9997/20) , 0, 0, 0, 0]
+            b,a = bilinear(b,a,self.sample_freq)
+        elif self.weight == 'C':
+            b = [(2*pi * f4)**2 * 10**(0.0619/20) , 0, 0]
+            b,a = bilinear(b,a,self.sample_freq)
+            b = append(b,zeros(2)) # make 6th order
+            a = append(a,zeros(2))
+        else:
+            b = zeros(7)
+            b[0] = 1.0
+            a = b # 6th order flat response
+        return b,a
+
+class FilterBank(TimeInOut):
+    """
+    Abstract base class for IIR filter banks based on scipy lfilter
+    implements a bank of parallel filters 
+    
+    Should not be instanciated by itself
+    """
+
+    #: List of filter coefficients for all filters
+    ba = Property()
+
+    #: List of labels for bands
+    bands = Property()
+
+    #: Number of bands
+    numbands = Property()
+
+    #: Number of bands
+    numchannels = Property()
+
+    def _get_ba( self ):
+        return [[1]],[[1]]
+
+    def _get_bands( self ):
+        return ['']
+
+    def _get_numbands( self ):
+        return 0
+
+    def _get_numchannels( self ):
+        return self.numbands*self.source.numchannels
 
     def result(self, num):
         """ 
         Python generator that yields the output block-wise.
-
         
         Parameters
         ----------
@@ -1368,13 +1673,69 @@ class FiltOctave( FiltFiltOctave ):
             Delivers the bandpass filtered output of source.
             The last block may be shorter than num.
         """
-        b, a = self.ba(3) # filter order = 3
-        zi = zeros((max(len(a), len(b))-1, self.source.numchannels))
+        numbands = self.numbands
+        snumch = self.source.numchannels
+        b, a = self.ba
+        zi = [zeros( (max(len(a[0]), len(b[0]))-1, snumch)) for _ in range(numbands)]
+        res = zeros((num,self.numchannels),dtype='float')
         for block in self.source.result(num):
-            block, zi = lfilter(b, a, block, axis=0, zi=zi)
-            yield block
+            bl = block.shape[0]
+            for i in range(numbands):
+                res[:,i*snumch:(i+1)*snumch], zi[i] = lfilter(b[i], a[i], block, axis=0, zi=zi[i])
+            yield res
 
-                       
+class OctaveFilterBank(FilterBank):
+    """
+    Octave or third-octave filter bank
+    """
+    #: Lowest band center frequency index; defaults to 21 (=125 Hz).
+    lband = Int(21, 
+        desc = "lowest band center frequency index")
+
+    #: Lowest band center frequency index + 1; defaults to 40 (=8000 Hz).
+    hband = Int(40, 
+        desc = "lowest band center frequency index")
+        
+    #: Octave fraction: 'Octave' or 'Third octave'; defaults to 'Octave'.
+    fraction = Trait('Octave', {'Octave':1, 'Third octave':3}, 
+        desc = "fraction of octave")
+
+    #: List of filter coefficients for all filters
+    ba = Property( depends_on = ['lband', 'hband', 'fraction', 'source.digest'])
+
+    #: List of labels for bands
+    bands = Property(depends_on = ['lband', 'hband', 'fraction'])
+
+    #: Number of bands
+    numbands = Property(depends_on = ['lband', 'hband', 'fraction'])
+    
+        # internal identifier
+    digest = Property( depends_on = ['source.digest', '__class__', \
+        'lband','hband','fraction','order'])
+
+    @cached_property
+    def _get_digest( self ):
+        return digest(self)
+
+    @cached_property
+    def _get_bands( self ):
+        return [10**(i/10) for i in range(self.lband,self.hband,4-self.fraction_)]
+
+    @cached_property
+    def _get_numbands( self ):
+        return len(self.bands)
+
+    @cached_property
+    def _get_ba( self ):
+        of = FiltOctave(source=self.source, fraction=self.fraction)
+        b, a = [], []
+        for i in range(self.lband,self.hband,4-self.fraction_):
+            of.band = 10**(i/10)
+            b_,a_ = of.ba
+            b.append(b_)
+            a.append(a_)
+        return b, a
+
 class TimeCache( TimeInOut ):
     """
     Caches time signal in cache file.
@@ -1475,6 +1836,11 @@ class WriteWAV( TimeInOut ):
     `*.wav` file.
     """
     
+    #: Name of the file to be saved. If none is given, the name will be
+    #: automatically generated from the sources.
+    name = File(filter=['*.wav'], 
+        desc="name of wave file")    
+    
     #: Basename for cache, readonly.
     basename = Property( depends_on = 'digest')
        
@@ -1513,10 +1879,13 @@ class WriteWAV( TimeInOut ):
             raise ValueError("No channels given for output.")
         if nc > 2:
             warn("More than two channels given for output, exported file will have %i channels" % nc)
-        name = self.basename
-        for nr in self.channels:
-            name += '_%i' % nr
-        name += '.wav'
+        if self.name == '':
+            name = self.basename
+            for nr in self.channels:
+                name += '_%i' % nr
+            name += '.wav'
+        else:
+            name = self.name
         wf = wave.open(name,'w')
         wf.setnchannels(nc)
         wf.setsampwidth(2)
@@ -1555,6 +1924,10 @@ class WriteH5( TimeInOut ):
     precision = Trait('float32', 'float64', 
                       desc="precision of H5 File")
 
+    #: Metadata to be stored in HDF5 file object
+    metadata = Dict(
+        desc="metadata to be stored in .h5 file")
+
     @cached_property
     def _get_digest( self ):
         return digest(self)
@@ -1572,6 +1945,7 @@ class WriteH5( TimeInOut ):
                 'time_data', (0, self.numchannels), self.precision)
         ac = f5h.get_data_by_reference('time_data')
         f5h.set_node_attribute(ac,'sample_freq',self.sample_freq)
+        self.add_metadata(f5h)
         return f5h
         
     def save(self):
@@ -1584,6 +1958,14 @@ class WriteH5( TimeInOut ):
         for data in self.source.result(4096):
             f5h.append_data(ac,data)
         f5h.close()
+
+    def add_metadata(self, f5h):
+        """ adds metadata to .h5 file """
+        nitems = len(self.metadata.items())
+        if nitems > 0:
+            f5h.create_new_group("metadata","/")
+            for key, value in self.metadata.items():
+                f5h.create_array('/metadata',key, value)
 
     def result(self, num):
         """ 

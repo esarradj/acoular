@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 #pylint: disable-msg=E0611, E1101, C0103, R0901, R0902, R0903, R0904, W0232
 #------------------------------------------------------------------------------
-# Copyright (c) 2007-2019, Acoular Development Team.
+# Copyright (c) 2007-2020, Acoular Development Team.
 #------------------------------------------------------------------------------
 """Measured multichannel data managment and simulation of acoustic sources.
 
 .. autosummary::
     :toctree: generated/
 
-    SamplesGenerator
     TimeSamples
     MaskedTimeSamples
     PointSource
@@ -19,10 +18,10 @@
 """
 
 # imports from other packages
-from numpy import array, sqrt, ones, empty, newaxis, uint32, arange, dot, int64, sum
+from numpy import array, sqrt, ones, empty, newaxis, uint32, arange, dot, int64
 from traits.api import Float, Int, Property, Trait, Delegate, \
-cached_property, Tuple, HasPrivateTraits, CLong, File, Instance, Any, \
-on_trait_change, List, ListInt, CArray
+cached_property, Tuple, CLong, File, Instance, Any, \
+on_trait_change, List, ListInt, CArray, Bool, Dict
 from os import path
 from warnings import warn
 
@@ -32,48 +31,10 @@ from .trajectory import Trajectory
 from .internal import digest
 from .microphones import MicGeom
 from .environments import Environment
+from .tprocess import SamplesGenerator
 from .signals import SignalGenerator
 from .h5files import H5FileBase, _get_h5file_class
 
-class SamplesGenerator( HasPrivateTraits ):
-    """
-    Base class for any generating signal processing block
-    
-    It provides a common interface for all SamplesGenerator classes, which
-    generate an output via the generator :meth:`result`.
-    This class has no real functionality on its own and should not be 
-    used directly.
-    """
-
-    #: Sampling frequency of the signal, defaults to 1.0
-    sample_freq = Float(1.0, 
-        desc="sampling frequency")
-    
-    #: Number of channels 
-    numchannels = CLong
-               
-    #: Number of samples 
-    numsamples = CLong
-    
-    # internal identifier
-    digest = ''
-               
-    def result(self, num):
-        """
-        Python generator that yields the output block-wise.
-                
-        Parameters
-        ----------
-        num : integer
-            This parameter defines the size of the blocks to be yielded
-            (i.e. the number of samples per block) 
-        
-        Returns
-        -------
-        No output since `SamplesGenerator` only represents a base class to derive
-        other classes from.
-        """
-        pass
 
 class TimeSamples( SamplesGenerator ):
     """
@@ -112,6 +73,10 @@ class TimeSamples( SamplesGenerator ):
     #: HDF5 file object
     h5f = Instance(H5FileBase, transient = True)
     
+    #: Provides metadata stored in HDF5 file object
+    metadata = Dict(
+        desc="metadata contained in .h5 file")
+    
     # Checksum over first data entries of all channels
     _datachecksum = Property()
     
@@ -147,9 +112,21 @@ class TimeSamples( SamplesGenerator ):
                 pass
         file = _get_h5file_class()
         self.h5f = file(self.name)
+        self.load_timedata()
+        self.load_metadata()
+
+    def load_timedata( self ):
+        """ loads timedata from .h5 file. Only for internal use. """
         self.data = self.h5f.get_data_by_reference('time_data')    
         self.sample_freq = self.h5f.get_node_attribute(self.data,'sample_freq')
         (self.numsamples, self.numchannels) = self.data.shape
+
+    def load_metadata( self ):
+        """ loads metadata from .h5 file. Only for internal use. """
+        self.metadata = {}
+        if '/metadata' in self.h5f:
+            for nodename, nodedata in self.h5f.get_child_nodes('/metadata'):
+                self.metadata[nodename] = nodedata
 
     def result(self, num=128):
         """
@@ -275,6 +252,11 @@ class MaskedTimeSamples( TimeSamples ):
                 pass
         file = _get_h5file_class()
         self.h5f = file(self.name)
+        self.load_timedata()
+        self.load_metadata()
+
+    def load_timedata( self ):
+        """ loads timedata from .h5 file. Only for internal use. """
         self.data = self.h5f.get_data_by_reference('time_data')    
         self.sample_freq = self.h5f.get_node_attribute(self.data,'sample_freq')
         (self.numsamples_total, self.numchannels_total) = self.data.shape
@@ -453,6 +435,10 @@ class MovingPointSource( PointSource ):
     The output is being generated via the :meth:`result` generator.
     """
 
+    #: Considering of convective amplification
+    conv_amp = Bool(False, 
+        desc="determines if convective amplification is considered")
+
     #: Trajectory of the source, 
     #: instance of the :class:`~acoular.trajectory.Trajectory` class.
     #: The start time is assumed to be the same as for the samples.
@@ -461,7 +447,7 @@ class MovingPointSource( PointSource ):
 
     # internal identifier
     digest = Property( 
-        depends_on = ['mics.digest', 'signal.digest', 'loc', \
+        depends_on = ['mics.digest', 'signal.digest', 'loc', 'conv_amp', \
          'env.digest', 'start_t', 'start', 'trajectory.digest', '__class__'], 
         )
                
@@ -516,6 +502,7 @@ class MovingPointSource( PointSource ):
             t += 1./self.sample_freq
             # emission time relative to start time
             ind = (te-self.start_t+self.start)*self.sample_freq
+            if self.conv_amp: rm *= (1-Mr)**2
             try:
                 out[i] = signal[array(0.5+ind*self.up, dtype=int64)]/rm
                 i += 1
@@ -526,6 +513,7 @@ class MovingPointSource( PointSource ):
                 break
         if i > 0: # if there are still samples to yield
             yield out[:i]
+            
 
 class PointSourceDipole ( PointSource ):
     """
@@ -749,7 +737,7 @@ class SourceMixer( SamplesGenerator ):
     Mixes the signals from several sources. 
     """
 
-    #: List of :class:`~acoular.sources.SamplesGenerator` objects
+    #: List of :class:`~acoular.tprocess.SamplesGenerator` objects
     #: to be mixed.
     sources = List( Instance(SamplesGenerator, ()) ) 
 

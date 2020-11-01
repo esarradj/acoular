@@ -1,6 +1,6 @@
 # coding=UTF-8
 #------------------------------------------------------------------------------
-# Copyright (c) 2007-2019, Acoular Development Team.
+# Copyright (c) 2007-2020, Acoular Development Team.
 #------------------------------------------------------------------------------
 
 from hashlib import md5
@@ -11,7 +11,7 @@ def digest( obj, name='digest'):
         vobj = obj
         try:
             for i in do_.split('.'):               
-                vobj = list(vobj.get(i.rstrip('[]')).values())[0]
+                vobj = list(vobj.trait_get(i.rstrip('[]')).values())[0]
             str_.append(str(vobj).encode("UTF-8"))
         except:
             pass
