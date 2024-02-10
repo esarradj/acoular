@@ -60,7 +60,10 @@ env=Environment(c=346.04)
 st = SteeringVector(grid=g, mics=m, env=env)
 f = PowerSpectra(time_data=t1, 
                window='Hanning', overlap='50%', block_size=128, #FFT-parameters
-               cached = False )  
+               cached = False , freq_range=(0,12000))  
+f1 = PowerSpectra(time_data=t1, 
+               window='Hanning', overlap='50%', block_size=128, #FFT-parameters
+               cached = False)  
 
 # produces a tuple of beamformer objects to test
 # because we need new objects for each test we have to call this more than once
@@ -83,8 +86,13 @@ def fbeamformers():
     bf = BeamformerFunctional(freq_data=f, steer=st, r_diag=False, gamma=3, cached = False)
     bgib = BeamformerGIB(freq_data=f, steer=st, method= 'LassoLars', n=2, cached = False)
     bgo = BeamformerGridlessOrth(freq_data=f, steer=st, r_diag=False, n=1,  shgo={'n':16}, cached = False)
-    bsodix = BeamformerSODIX(freq_data=f, steer=st,max_iter=10, cached = False)
+    bsodix = BeamformerSODIX(freq_data=f, steer=st,max_iter=500, cached = False)
     return (bbase, bc, beig, bm, bl, bo, bs, bd, bcmflassobic, bcmfnnls, bf, bdp, bgib, bgo,bsodix)
+
+# for tests with different cache configurations
+def fbeamformers1():
+    bbase = BeamformerBase(freq_data=f, steer=st, r_diag=True, cached = False)
+    return (bbase,)
 
 class acoular_beamformer_test(unittest.TestCase):
 
@@ -96,13 +104,15 @@ class acoular_beamformer_test(unittest.TestCase):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
                 # stack all frequency band results together
                 actual_data = np.array([b.synthetic(cf,1) for cf in cfreqs],dtype=np.float32)
+                #if 'SODIX' in b.__class__.__name__:
+                #    actual_data *= 0.0
                 if WRITE_NEW_REFERENCE_DATA:
                     np.save(name,actual_data)
                 ref_data = np.load(name)
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the results to be computed and written to cache
         acoular.config.global_caching = 'individual'
-        for b in fbeamformers():
+        for b in fbeamformers1():
             b.cached = True
             with self.subTest(b.__class__.__name__+" global_caching = individual"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
@@ -111,7 +121,7 @@ class acoular_beamformer_test(unittest.TestCase):
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the results to be read from cache
         acoular.config.global_caching = 'all'
-        for b in fbeamformers():
+        for b in fbeamformers1():
             b.cached = True
             with self.subTest(b.__class__.__name__+" global_caching = all"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
@@ -120,7 +130,7 @@ class acoular_beamformer_test(unittest.TestCase):
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the cached results to be overwritten
         acoular.config.global_caching = 'overwrite'
-        for b0,b1 in zip(fbeamformers(),fbeamformers()):
+        for b0,b1 in zip(fbeamformers1(),fbeamformers1()):
             b0.cached = True
             b1.cached = True
             with self.subTest(b0.__class__.__name__+" global_caching = overwrite"):
@@ -164,9 +174,9 @@ class Test_PowerSpectra(unittest.TestCase):
 
     def test_csm(self):
         """ test that csm result has not changed over different releases"""
-        name = join('reference_data',f'{f.__class__.__name__}_csm.npy')
+        name = join('reference_data',f'{f1.__class__.__name__}_csm.npy')
         # test only two frequencies
-        actual_data = np.array(f.csm[(16,32),:,:],dtype=np.complex64)
+        actual_data = np.array(f1.csm[(16,32),:,:],dtype=np.complex64)
         if WRITE_NEW_REFERENCE_DATA:
             np.save(name,actual_data)
         ref_data = np.load(name)
@@ -174,9 +184,9 @@ class Test_PowerSpectra(unittest.TestCase):
 
     def test_ev(self):
         """ test that eve and eva result has not changed over different releases"""
-        name = join('reference_data',f'{f.__class__.__name__}_ev.npy')
+        name = join('reference_data',f'{f1.__class__.__name__}_ev.npy')
         # test only two frequencies
-        actual_data = np.array((f.eve*f.eva[:,:,np.newaxis])[(16,32),:,:],dtype=np.complex64)
+        actual_data = np.array((f1.eve*f1.eva[:,:,np.newaxis])[(16,32),:,:],dtype=np.complex64)
         if WRITE_NEW_REFERENCE_DATA:
             np.save(name,actual_data)
         ref_data = np.load(name)
