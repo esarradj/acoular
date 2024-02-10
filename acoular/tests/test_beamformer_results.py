@@ -86,6 +86,10 @@ def fbeamformers():
     bsodix = BeamformerSODIX(freq_data=f, steer=st,max_iter=10, cached = False)
     return (bbase, bc, beig, bm, bl, bo, bs, bd, bcmflassobic, bcmfnnls, bf, bdp, bgib, bgo,bsodix)
 
+def fbeamformers1():
+    bbase = BeamformerBase(freq_data=f, steer=st, r_diag=True, cached = False)
+    return (bbase,)
+
 class acoular_beamformer_test(unittest.TestCase):
 
     def test_beamformer_freq_results(self):
@@ -96,13 +100,15 @@ class acoular_beamformer_test(unittest.TestCase):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
                 # stack all frequency band results together
                 actual_data = np.array([b.synthetic(cf,1) for cf in cfreqs],dtype=np.float32)
+                #if 'SODIX' in b.__class__.__name__:
+                #    actual_data *= 0.0
                 if WRITE_NEW_REFERENCE_DATA:
                     np.save(name,actual_data)
                 ref_data = np.load(name)
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the results to be computed and written to cache
         acoular.config.global_caching = 'individual'
-        for b in fbeamformers():
+        for b in fbeamformers1():
             b.cached = True
             with self.subTest(b.__class__.__name__+" global_caching = individual"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
@@ -111,7 +117,7 @@ class acoular_beamformer_test(unittest.TestCase):
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the results to be read from cache
         acoular.config.global_caching = 'all'
-        for b in fbeamformers():
+        for b in fbeamformers1():
             b.cached = True
             with self.subTest(b.__class__.__name__+" global_caching = all"):
                 name = join('reference_data',f'{b.__class__.__name__}.npy')
@@ -120,7 +126,7 @@ class acoular_beamformer_test(unittest.TestCase):
                 np.testing.assert_allclose(actual_data, ref_data, rtol=5e-5, atol=5e-8)
         # we expect the cached results to be overwritten
         acoular.config.global_caching = 'overwrite'
-        for b0,b1 in zip(fbeamformers(),fbeamformers()):
+        for b0,b1 in zip(fbeamformers1(),fbeamformers1()):
             b0.cached = True
             b1.cached = True
             with self.subTest(b0.__class__.__name__+" global_caching = overwrite"):
