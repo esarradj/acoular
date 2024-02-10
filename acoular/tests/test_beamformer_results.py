@@ -60,7 +60,10 @@ env=Environment(c=346.04)
 st = SteeringVector(grid=g, mics=m, env=env)
 f = PowerSpectra(time_data=t1, 
                window='Hanning', overlap='50%', block_size=128, #FFT-parameters
-               cached = False )  
+               cached = False , freq_range=(0,12000))  
+f1 = PowerSpectra(time_data=t1, 
+               window='Hanning', overlap='50%', block_size=128, #FFT-parameters
+               cached = False)  
 
 # produces a tuple of beamformer objects to test
 # because we need new objects for each test we have to call this more than once
@@ -83,9 +86,10 @@ def fbeamformers():
     bf = BeamformerFunctional(freq_data=f, steer=st, r_diag=False, gamma=3, cached = False)
     bgib = BeamformerGIB(freq_data=f, steer=st, method= 'LassoLars', n=2, cached = False)
     bgo = BeamformerGridlessOrth(freq_data=f, steer=st, r_diag=False, n=1,  shgo={'n':16}, cached = False)
-    bsodix = BeamformerSODIX(freq_data=f, steer=st,max_iter=10, cached = False)
+    bsodix = BeamformerSODIX(freq_data=f, steer=st,max_iter=500, cached = False)
     return (bbase, bc, beig, bm, bl, bo, bs, bd, bcmflassobic, bcmfnnls, bf, bdp, bgib, bgo,bsodix)
 
+# for tests with different cache configurations
 def fbeamformers1():
     bbase = BeamformerBase(freq_data=f, steer=st, r_diag=True, cached = False)
     return (bbase,)
@@ -170,9 +174,9 @@ class Test_PowerSpectra(unittest.TestCase):
 
     def test_csm(self):
         """ test that csm result has not changed over different releases"""
-        name = join('reference_data',f'{f.__class__.__name__}_csm.npy')
+        name = join('reference_data',f'{f1.__class__.__name__}_csm.npy')
         # test only two frequencies
-        actual_data = np.array(f.csm[(16,32),:,:],dtype=np.complex64)
+        actual_data = np.array(f1.csm[(16,32),:,:],dtype=np.complex64)
         if WRITE_NEW_REFERENCE_DATA:
             np.save(name,actual_data)
         ref_data = np.load(name)
@@ -180,9 +184,9 @@ class Test_PowerSpectra(unittest.TestCase):
 
     def test_ev(self):
         """ test that eve and eva result has not changed over different releases"""
-        name = join('reference_data',f'{f.__class__.__name__}_ev.npy')
+        name = join('reference_data',f'{f1.__class__.__name__}_ev.npy')
         # test only two frequencies
-        actual_data = np.array((f.eve*f.eva[:,:,np.newaxis])[(16,32),:,:],dtype=np.complex64)
+        actual_data = np.array((f1.eve*f1.eva[:,:,np.newaxis])[(16,32),:,:],dtype=np.complex64)
         if WRITE_NEW_REFERENCE_DATA:
             np.save(name,actual_data)
         ref_data = np.load(name)

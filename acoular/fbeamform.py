@@ -2258,7 +2258,6 @@ class BeamformerSODIX( BeamformerBase ):
                                                          factr=100.0, pgtol=1e-09, epsilon=1e-08,
                                                           iprint=-1, maxfun=1500000, maxiter=self.max_iter,
                                                           disp=-1, callback=None, maxls=20)
-                    print(f[i], yval, dicts)
                     #squared pressure
                     ac[i]=qi**2
                 else:
